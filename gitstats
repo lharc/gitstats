@@ -133,6 +133,15 @@ def getnumoflinesinblob(ext_blob):
 	ext, blob_id = ext_blob
 	return (ext, blob_id, int(getpipeoutput(['git cat-file blob %s' % blob_id, 'wc -l']).split()[0]))
 
+def filenameExclude(filename):
+	res = [] # list of regex
+	if 'file-exclude' in conf:
+		res = conf['file-exclude']
+	for pattern in res:
+		if re.search(pattern, filename) != None:
+			return True
+	return False
+
 class DataCollector:
 	"""Manages data collection from a revision control repository."""
 	def __init__(self):
@@ -489,7 +498,11 @@ class GitDataCollector(DataCollector):
 			blob_id = parts[2]
 			size = int(parts[3])
 			fullpath = parts[4]
+			# filtering, exclude filename if match against list of regexes
+			if filenameExclude(fullpath) == True: # match found against regexs
+			  continue
 
+			print '    accounting file %s' % fullpath
 			self.total_size += size
 			self.total_files += 1
 
@@ -536,7 +549,7 @@ class GitDataCollector(DataCollector):
 		extra = ''
 		if conf['linear_linestats']:
 			extra = '--first-parent -m'
-		lines = getpipeoutput(['git log --shortstat %s --pretty=format:"%%at %%aN" %s' % (extra, getlogrange('HEAD'))]).split('\n')
+		lines = getpipeoutput(['git log --numstat %s --pretty=format:"%%at %%aN" %s' % (extra, getlogrange('HEAD'))]).split('\n')
 		lines.reverse()
 		files = 0; inserted = 0; deleted = 0; total_lines = 0
 		author = None
@@ -544,8 +557,10 @@ class GitDataCollector(DataCollector):
 			if len(line) == 0:
 				continue
 
+			cols = line.split('\t')
 			# <stamp> <author>
-			if re.search('files? changed', line) == None:
+			if len(cols) == 1:
+				line = cols[0]
 				pos = line.find(' ')
 				if pos != -1:
 					try:
@@ -561,25 +576,22 @@ class GitDataCollector(DataCollector):
 						self.lines_added_by_year[yy] = self.lines_added_by_year.get(yy,0) + inserted
 						self.lines_removed_by_year[yy] = self.lines_removed_by_year.get(yy, 0) + deleted
 
+						total_lines += inserted
+						total_lines -= deleted
+						self.total_lines_added += inserted
+						self.total_lines_removed += deleted
+						#self.changes_by_date[stamp] = { 'files': files, 'ins': inserted, 'del': deleted }
 						files, inserted, deleted = 0, 0, 0
 					except ValueError:
 						print 'Warning: unexpected line "%s"' % line
 				else:
 					print 'Warning: unexpected line "%s"' % line
 			else:
-				numbers = getstatsummarycounts(line)
-
-				if len(numbers) == 3:
-					(files, inserted, deleted) = map(lambda el : int(el), numbers)
-					total_lines += inserted
-					total_lines -= deleted
-					self.total_lines_added += inserted
-					self.total_lines_removed += deleted
-
-				else:
-					print 'Warning: failed to handle line "%s"' % line
-					(files, inserted, deleted) = (0, 0, 0)
-				#self.changes_by_date[stamp] = { 'files': files, 'ins': inserted, 'del': deleted }
+				if(filenameExclude(cols[2]) == False):
+					if(cols[0] != '-'): # unless binary file
+						inserted += int(cols[0])
+						deleted  += int(cols[1])
+						files    += 1
 		self.total_lines += total_lines
 
 		# Per-author statistics
@@ -590,7 +602,7 @@ class GitDataCollector(DataCollector):
 		# Similar to the above, but never use --first-parent
 		# (we need to walk through every commit to know who
 		# committed what, not just through mainline)
-		lines = getpipeoutput(['git log --shortstat --date-order --pretty=format:"%%at %%aN" %s' % (getlogrange('HEAD'))]).split('\n')
+		lines = getpipeoutput(['git log --numstat --date-order --pretty=format:"%%at %%aN" %s' % (getlogrange('HEAD'))]).split('\n')
 		lines.reverse()
 		files = 0; inserted = 0; deleted = 0
 		author = None
@@ -599,8 +611,10 @@ class GitDataCollector(DataCollector):
 			if len(line) == 0:
 				continue
 
+			cols = line.split('\t')
 			# <stamp> <author>
-			if re.search('files? changed', line) == None:
+			if len(cols) == 1:
+				line = cols[0]
 				pos = line.find(' ')
 				if pos != -1:
 					try:
@@ -626,13 +640,11 @@ class GitDataCollector(DataCollector):
 				else:
 					print 'Warning: unexpected line "%s"' % line
 			else:
-				numbers = getstatsummarycounts(line);
-
-				if len(numbers) == 3:
-					(files, inserted, deleted) = map(lambda el : int(el), numbers)
-				else:
-					print 'Warning: failed to handle line "%s"' % line
-					(files, inserted, deleted) = (0, 0, 0)
+				if(filenameExclude(cols[2]) == False):
+					if(cols[0] != '-'): # unless binary file
+						inserted += int(cols[0])
+						deleted  += int(cols[1])
+						files += 1
 	
 	def refine(self):
 		# authors
@@ -1416,7 +1428,7 @@ Please see the manual page for more details.
 
 class GitStats:
 	def run(self, args_orig):
-		optlist, args = getopt.getopt(args_orig, 'hc:', ["help"])
+		optlist, args = getopt.getopt(args_orig, 'hc:', ["help", "file-exclude="])
 		for o,v in optlist:
 			if o == '-c':
 				key, value = v.split('=', 1)
@@ -1426,6 +1438,12 @@ class GitStats:
 					conf[key] = int(value)
 				else:
 					conf[key] = value
+			elif o == '--file-exclude': # file exclude filter
+				key = 'file-exclude'
+				if key not in conf:
+					conf['file-exclude'] = [v]
+				else:
+					conf['file-exclude'].append(v)
 			elif o in ('-h', '--help'):
 				usage()
 				sys.exit()
